@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "torch",
+#   "torchvision",
+# ]
+# ///
+#!/usr/bin/env python3
 """
 Clean checkpoint script for the Fashion-MNIST Adam-metric curvature experiment.
 
@@ -29,8 +37,6 @@ The script is deliberately full-model rather than tiled.  The v22 winning
 configuration used tile_size=6 for a six-block model, so this is the same
 research path without the abandoned tile/sketch/batch branches.
 """
-
-from __future__ import annotations
 
 import argparse
 import csv
@@ -596,7 +602,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mode", choices=["adam", "adam_curv"], default="adam_curv")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out_dir", default="runs_clean_curv")
+    p.add_argument("--out_dir", default="runs")
     p.add_argument("--data_dir", default="./data")
 
     p.add_argument("--n_train", type=int, default=8192)

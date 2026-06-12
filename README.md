@@ -236,7 +236,7 @@ Objectives:
 The main experimental script is:
 
 ```bash
-python graph_block_lm_experiment.py \
+uv run graph_block_lm_experiment.py \
   --device cuda \
   --problem fashion_mnist \
   --objective mse \
@@ -258,7 +258,7 @@ python graph_block_lm_experiment.py \
 For CE:
 
 ```bash
-python graph_block_lm_experiment.py \
+uv run graph_block_lm_experiment.py \
   --device cuda \
   --problem fashion_mnist \
   --objective ce \
