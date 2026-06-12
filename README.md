@@ -76,9 +76,8 @@ Then solve a tiny damped problem in that subspace.
 
 $$
 (U^\top H U + \lambda_c I)z
-===========================
-
--U^\top(g + H\delta_A).
+=
+-U^\top(g + H\delta_A)
 $$
 
 The final candidate step is
