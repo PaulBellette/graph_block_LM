@@ -6,7 +6,6 @@
 #   "torchvision",
 # ]
 # ///
-#!/usr/bin/env python3
 """
 Clean checkpoint script for the Fashion-MNIST Adam-metric curvature experiment.
 
@@ -20,6 +19,14 @@ It keeps only the mechanisms that survived the experiments:
     Adam base step plus a bounded, fresh-gated, coherent low-rank curvature
     correction.  The correction basis and correction coefficients are built
     from the same accumulated curvature batches.
+
+Models:
+  cnn
+    Small Fashion-MNIST convolutional classifier.
+
+  tiny_vit
+    Tiny ViT-style image classifier.  Patch embedding, CLS token,
+    learned positional embedding, Transformer blocks, and a linear head.
 
 Objectives:
   mse
@@ -43,6 +50,7 @@ import csv
 import json
 import math
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -50,6 +58,11 @@ from typing import Callable, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+try:
+    from torch.func import functional_call
+except Exception:  # pragma: no cover - older torch fallback
+    from torch.nn.utils.stateless import functional_call
 
 
 # -----------------------------
@@ -117,6 +130,89 @@ class FashionMNISTConvClassifier(nn.Module):
         if offset != flat.numel():
             raise RuntimeError(f"Consumed {offset} params but flat has {flat.numel()}")
         return out
+
+
+class TinyViTBlock(nn.Module):
+    def __init__(self, dim: int, heads: int, mlp_dim: int):
+        super().__init__()
+        if dim % heads != 0:
+            raise ValueError(f"vit_dim={dim} must be divisible by vit_heads={heads}")
+        self.dim = dim
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.scale = self.head_dim ** -0.5
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.proj = nn.Linear(dim, dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, mlp_dim)
+        self.fc2 = nn.Linear(mlp_dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bsz, ntok, dim = x.shape
+        h = self.norm1(x)
+        qkv = self.qkv(h).view(bsz, ntok, 3, self.heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        h = (attn @ v).transpose(1, 2).contiguous().view(bsz, ntok, dim)
+        x = x + self.proj(h)
+
+        h = self.norm2(x)
+        h = self.fc2(F.gelu(self.fc1(h)))
+        return x + h
+
+
+class TinyViTClassifier(nn.Module):
+    def __init__(
+        self,
+        *,
+        image_size: int = 28,
+        patch_size: int = 7,
+        dim: int = 32,
+        depth: int = 2,
+        heads: int = 4,
+        mlp_dim: int = 64,
+        num_classes: int = 10,
+    ):
+        super().__init__()
+        if image_size % patch_size != 0:
+            raise ValueError("image_size must be divisible by patch_size")
+        self.patch_size = patch_size
+        n_side = image_size // patch_size
+        self.num_patches = n_side * n_side
+
+        self.patch_embed = nn.Conv2d(1, dim, kernel_size=patch_size, stride=patch_size)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, dim))
+        self.blocks = nn.ModuleList([TinyViTBlock(dim, heads, mlp_dim) for _ in range(depth)])
+        self.norm = nn.LayerNorm(dim)
+        self.head = nn.Linear(dim, num_classes)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.trunc_normal_(module.weight, std=0.02)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(module.weight, nonlinearity="linear")
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.patch_embed(x).flatten(2).transpose(1, 2)
+        cls = self.cls_token.expand(h.shape[0], -1, -1)
+        h = torch.cat([cls, h], dim=1) + self.pos_embed
+        for block in self.blocks:
+            h = block(h)
+        h = self.norm(h[:, 0])
+        return self.head(h)
 
 
 # -----------------------------
@@ -206,6 +302,25 @@ def set_flat(model: nn.Module, flat: torch.Tensor) -> None:
         raise RuntimeError(f"Consumed {offset} params but flat has {flat.numel()}")
 
 
+def flat_to_param_dict(model: nn.Module, flat: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
+    params: OrderedDict[str, torch.Tensor] = OrderedDict()
+    offset = 0
+    for name, p in model.named_parameters():
+        n = p.numel()
+        params[name] = flat[offset:offset + n].view_as(p)
+        offset += n
+    if offset != flat.numel():
+        raise RuntimeError(f"Consumed {offset} params but flat has {flat.numel()}")
+    return params
+
+
+def forward_with_flat(model: nn.Module, x: torch.Tensor, flat: torch.Tensor) -> torch.Tensor:
+    # Using functional_call keeps JVP/VJP code model-agnostic.  Any model with
+    # an ordinary forward can now use the curvature path.
+    params = flat_to_param_dict(model, flat)
+    return functional_call(model, params, (x,))
+
+
 # -----------------------------
 # Objective helpers
 # -----------------------------
@@ -221,18 +336,18 @@ def loss_from_logits(logits: torch.Tensor, labels: torch.Tensor, objective: str)
 
 
 def loss_from_flat(
-    model: FashionMNISTConvClassifier,
+    model: nn.Module,
     flat: torch.Tensor,
     xb: torch.Tensor,
     yb: torch.Tensor,
     objective: str,
 ) -> torch.Tensor:
-    return loss_from_logits(model.forward_with_flat(xb, flat), yb, objective)
+    return loss_from_logits(forward_with_flat(model, xb, flat), yb, objective)
 
 
 @torch.no_grad()
 def eval_metrics(
-    model: FashionMNISTConvClassifier,
+    model: nn.Module,
     x: torch.Tensor,
     y: torch.Tensor,
     *,
@@ -315,7 +430,7 @@ def softmax_ce_hvp_logits(logits: torch.Tensor, jv_logits: torch.Tensor) -> torc
 
 def ggn_flat_matvec(
     *,
-    model: FashionMNISTConvClassifier,
+    model: nn.Module,
     flat0: torch.Tensor,
     xb: torch.Tensor,
     yb: torch.Tensor,
@@ -327,14 +442,14 @@ def ggn_flat_matvec(
         flat_for_jvp = flat0.detach().clone().requires_grad_(True)
 
         def logits_fn(z: torch.Tensor) -> torch.Tensor:
-            return model.forward_with_flat(xb, z)
+            return forward_with_flat(model, xb, z)
 
         logits, jv_logits = torch.autograd.functional.jvp(
             logits_fn, flat_for_jvp, v_phys.detach(), create_graph=False, strict=False
         )
 
         flat_for_vjp = flat0.detach().clone().requires_grad_(True)
-        logits_vjp = model.forward_with_flat(xb, flat_for_vjp)
+        logits_vjp = forward_with_flat(model, xb, flat_for_vjp)
         if objective == "mse":
             # Hessian wrt logits for 0.5 * mean((logits - one_hot)^2) is I / numel.
             hv_logits = jv_logits.detach() / float(logits_vjp.numel())
@@ -352,7 +467,7 @@ def ggn_flat_matvec(
 
 def objective_grad_flat(
     *,
-    model: FashionMNISTConvClassifier,
+    model: nn.Module,
     flat0: torch.Tensor,
     xb: torch.Tensor,
     yb: torch.Tensor,
@@ -381,7 +496,7 @@ class StepStats:
 
 def adam_curvature_step(
     *,
-    model: FashionMNISTConvClassifier,
+    model: nn.Module,
     x_train: torch.Tensor,
     y_train: torch.Tensor,
     x_val: torch.Tensor,
@@ -537,7 +652,7 @@ def adam_curvature_step(
 
 def adam_step(
     *,
-    model: FashionMNISTConvClassifier,
+    model: nn.Module,
     x_train: torch.Tensor,
     y_train: torch.Tensor,
     objective: str,
@@ -574,13 +689,23 @@ def adam_step(
 def make_out_name(args: argparse.Namespace) -> str:
     parts = [
         args.problem,
+        args.model,
         args.objective,
         args.mode,
         f"seed{args.seed}",
         f"steps{args.steps}",
         f"bs{args.batch_size}",
-        f"conv{args.conv_channels}",
     ]
+    if args.model == "cnn":
+        parts.append(f"conv{args.conv_channels}")
+    else:
+        parts.extend([
+            f"vitp{args.vit_patch_size}",
+            f"d{args.vit_dim}",
+            f"L{args.vit_depth}",
+            f"h{args.vit_heads}",
+            f"mlp{args.vit_mlp_dim}",
+        ])
     if args.mode == "adam":
         parts.append(f"lr{args.lr:g}")
     else:
@@ -598,6 +723,7 @@ def make_out_name(args: argparse.Namespace) -> str:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Clean Adam + coherent curvature correction experiment")
     p.add_argument("--problem", choices=["fashion_mnist", "synthetic_cls"], default="fashion_mnist")
+    p.add_argument("--model", choices=["cnn", "tiny_vit"], default="cnn")
     p.add_argument("--objective", choices=["mse", "ce"], default="mse")
     p.add_argument("--mode", choices=["adam", "adam_curv"], default="adam_curv")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -609,6 +735,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n_val", type=int, default=2048)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--conv_channels", type=int, default=16)
+    p.add_argument("--vit_patch_size", type=int, default=7)
+    p.add_argument("--vit_dim", type=int, default=32)
+    p.add_argument("--vit_depth", type=int, default=2)
+    p.add_argument("--vit_heads", type=int, default=4)
+    p.add_argument("--vit_mlp_dim", type=int, default=64)
 
     p.add_argument("--steps", type=int, default=1000)
     p.add_argument("--eval_every", type=int, default=50)
@@ -650,7 +781,19 @@ def main() -> None:
             n_train=args.n_train, n_val=args.n_val, device=device, seed=args.seed
         )
 
-    model = FashionMNISTConvClassifier(channels=args.conv_channels).to(device)
+    if args.model == "cnn":
+        model = FashionMNISTConvClassifier(channels=args.conv_channels).to(device)
+    elif args.model == "tiny_vit":
+        model = TinyViTClassifier(
+            patch_size=args.vit_patch_size,
+            dim=args.vit_dim,
+            depth=args.vit_depth,
+            heads=args.vit_heads,
+            mlp_dim=args.vit_mlp_dim,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
+
     flat0 = get_flat(model).to(device)
     m = torch.zeros_like(flat0)
     v = torch.zeros_like(flat0)
