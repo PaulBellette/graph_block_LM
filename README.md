@@ -16,9 +16,9 @@ Levenberg-Marquardt is attractive, it can make large moves based on the curvatur
 
 For a least-squares problem it solves
 
-$
+$$
 (J^\top J + \lambda I)\delta = -J^\top r.
-$
+$$
 
 For neural nets this is not practical, the parameter space is too large. Also the batch curvature is noisy.
 
@@ -28,11 +28,11 @@ The stochastic setting also changes the problem.
 
 A minibatch Newton step is not an unbiased Newton step.
 
-$
+$$
 \mathbb{E}[(H_B+\lambda I)^{-1}g_B]
 \neq
 (H+\lambda I)^{-1}g.
-$
+$$
 
 This changed the goal to something more modest. Use a small projected problem and use it as a correction to Adam.
 
@@ -42,50 +42,50 @@ Adam already gives a good scaled direction.
 
 Let
 
-$
+$$
 D = \sqrt{\hat v} + \epsilon.
-$
+$$
 
 The Adam-like base step is
 
-$
+$$
 \delta_A = -\eta \frac{\hat m}{D}.
-$
+$$
 
 In the experiments here,
 
-$
+$$
 \eta \approx \frac{1}{\lambda}.
-$
+$$
 
 Then build a small correction space. Use a rank (k) Krylov-like basis, the first direction is the Adam direction amd the next directions come from local curvature.
 
 In whitened coordinates:
 
-$
+$$
 K = D^{-1/2} J^\top J D^{-1/2}.
-$
+$$
 
 A rank-2 version is roughly
 
-$
+$$
 U = [u_0, Ku_0].
-$
+$$
 
 Then solve a tiny damped problem in that subspace.
 
-$
+$$
 (U^\top H U + \lambda_c I)z
 ===========================
 
 -U^\top(g + H\delta_A).
-$
+$$
 
 The final candidate step is
 
-$
+$$
 \delta = \delta_A + Uz.
-$
+$$
 
 The correction is clipped and gated.
 
@@ -141,9 +141,9 @@ This mothed is scalable to neural network sized problems but it is still a littl
 
 The cross-entropy version also seems to workish. For CE the curvature is not the squared residual curvature, it uses the softmax CE generalized Gauss-Newton / Fisher form:
 
-$
+$$
 J^\top(\mathrm{diag}(p)-pp^\top)J.
-$
+$$
 
 This is all new and still to be investigated so take any preliminary results with a grain of salt. It is competitive with Adam on best validation CE loss, but both methods overfit more than the squared loss.
 
