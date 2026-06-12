@@ -1,6 +1,6 @@
 # Adam-metric curvature correction
 
-It is impossible to practically get Levenberg-Marquardt to work on a decent sized neural network due to the size of the Jacobian. This repo is trying to get something LM-like work on a neural net (based on the ideas of the Gower-Richtárik sketch-and-project).
+It is impossible to practically get Levenberg-Marquardt to work on a decent sized neural network due to the size of the Jacobian. This repo is trying to get something LM-like work on a neural net (based on the ideas of Gower-Richtárik sketch-and-project).
 
 Instead:
 
