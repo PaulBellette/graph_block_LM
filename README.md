@@ -25,7 +25,7 @@ For neural nets this is not practical, the parameter space is way too large. Als
 The stochastic setting also changes the problem, a minibatch Newton step is not an unbiased Newton step.
 
 $$
-\mathbb{E}[(H_B+\lambda I)^{-1}g_B] = (H+\lambda I)^{-1}g.
+\mathbb{E}[(H_B+\lambda I)^{-1}g_B] \neq (H+\lambda I)^{-1}g.
 $$
 
 This changed the goal to something more modest. This work landed on using a small projected problem and then  subsequently use it as a correction to Adam.
